@@ -30,7 +30,7 @@ def load_data(path: Path) -> pd.DataFrame:
 
 df = load_data(DATA_PATH)
 
-st.title("SIA Review Pulse v2")
+st.title("SIA Review Pulse")
 st.subheader("Singapore Airlines review insights")
 
 with st.sidebar:
