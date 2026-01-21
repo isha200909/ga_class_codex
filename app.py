@@ -1,8 +1,20 @@
 from pathlib import Path
 import re
+import subprocess
+import sys
 
 import pandas as pd
 import streamlit as st
+
+try:
+    from wordcloud import WordCloud, STOPWORDS
+except ImportError:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "wordcloud"])
+        from wordcloud import WordCloud, STOPWORDS
+    except Exception:
+        WordCloud = None
+        STOPWORDS = set()
 
 DATA_PATH = Path(__file__).parent / "data" / "singapore_airlines_reviews.csv"
 
@@ -31,6 +43,7 @@ def load_data(path: Path) -> pd.DataFrame:
 df = load_data(DATA_PATH)
 
 st.title("SIA Review Pulse")
+summary_placeholder = st.empty()
 st.subheader("Singapore Airlines review insights")
 
 with st.sidebar:
@@ -39,9 +52,15 @@ with st.sidebar:
     if "published_date" in df.columns and df["published_date"].notna().any():
         min_date = df["published_date"].min().date()
         max_date = df["published_date"].max().date()
-        start_date, end_date = st.date_input(
-            "Published date range",
-            value=(min_date, max_date),
+        start_date = st.date_input(
+            "Start date",
+            value=min_date,
+            min_value=min_date,
+            max_value=max_date,
+        )
+        end_date = st.date_input(
+            "End date",
+            value=max_date,
             min_value=min_date,
             max_value=max_date,
         )
@@ -64,6 +83,7 @@ with st.sidebar:
 filtered = df.copy()
 
 if start_date and end_date and "published_date" in filtered.columns:
+    start_date, end_date = sorted([start_date, end_date])
     start_ts = pd.Timestamp(start_date)
     end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
     filtered = filtered[(filtered["published_date"] >= start_ts) & (filtered["published_date"] <= end_ts)]
@@ -102,6 +122,27 @@ if search_query:
 if filtered.empty:
     st.warning("No reviews match the selected filters.")
     st.stop()
+
+total_reviews = len(filtered)
+avg_rating = filtered["rating"].mean() if "rating" in filtered.columns else None
+positive_pct = (filtered["rating"].between(4, 5).mean() * 100) if "rating" in filtered.columns else None
+negative_pct = (filtered["rating"].between(1, 2).mean() * 100) if "rating" in filtered.columns else None
+
+summary_parts = [f"Total reviews: {total_reviews:,}"]
+if avg_rating is not None:
+    summary_parts.append(f"Average rating: {avg_rating:.2f}")
+else:
+    summary_parts.append("Average rating: n/a")
+if positive_pct is not None:
+    summary_parts.append(f"Positive reviews (ratings 4-5): {positive_pct:.1f}%")
+else:
+    summary_parts.append("Positive reviews (ratings 4-5): n/a")
+if negative_pct is not None:
+    summary_parts.append(f"Negative reviews (ratings 1-2): {negative_pct:.1f}%")
+else:
+    summary_parts.append("Negative reviews (ratings 1-2): n/a")
+
+summary_placeholder.markdown(" | ".join(summary_parts))
 
 metric_cols = st.columns(4)
 metric_cols[0].metric("Total reviews", f"{len(filtered):,}")
@@ -147,10 +188,63 @@ if "published_platform" in filtered.columns:
     platform_counts = filtered["published_platform"].value_counts().rename("reviews")
     st.bar_chart(platform_counts)
 
-st.subheader("Latest keyword-matched reviews")
+st.subheader("Latest matched reviews")
 show_cols = [c for c in ["published_date", "title", "rating", "published_platform", "helpful_votes"] if c in filtered.columns]
 latest = filtered.sort_values("published_date", ascending=False) if "published_date" in filtered.columns else filtered
-if selected_keywords:
+if selected_keywords or search_query:
     st.dataframe(latest[show_cols].head(20), use_container_width=True)
 else:
-    st.info("Select one or more keywords to see matching latest reviews.")
+    st.info("Enter a search query or select keywords to see matching latest reviews.")
+
+st.markdown("---")
+st.subheader("Keyword clouds")
+
+
+def build_cloud_text(frame: pd.DataFrame) -> str:
+    text_cols = []
+    if "title" in frame.columns:
+        text_cols.append(frame["title"].fillna(""))
+    if "text" in frame.columns:
+        text_cols.append(frame["text"].fillna(""))
+    if not text_cols:
+        return ""
+    combined = text_cols[0].astype(str)
+    for col in text_cols[1:]:
+        combined = combined + " " + col.astype(str)
+    return " ".join(combined.tolist())
+
+
+def render_wordcloud(text: str, caption: str) -> None:
+    if not text.strip():
+        st.info(f"No {caption.lower()} reviews available for a keyword cloud.")
+        return
+    if WordCloud is None:
+        st.error("wordcloud is not available. Please install it to render keyword clouds.")
+        return
+    stopwords = set(STOPWORDS)
+    wc = WordCloud(
+        width=1000,
+        height=600,
+        background_color="white",
+        stopwords=stopwords,
+        collocations=False,
+    ).generate(text)
+    st.image(wc.to_array(), use_container_width=True)
+
+
+cloud_cols = st.columns(2)
+
+if "rating" in filtered.columns:
+    positive = filtered[filtered["rating"].between(4, 5)]
+    negative = filtered[filtered["rating"].between(1, 2)]
+else:
+    positive = filtered.iloc[0:0]
+    negative = filtered.iloc[0:0]
+
+with cloud_cols[0]:
+    st.markdown("**Positive reviews (ratings 4-5)**")
+    render_wordcloud(build_cloud_text(positive), "Positive")
+
+with cloud_cols[1]:
+    st.markdown("**Negative reviews (ratings 1-2)**")
+    render_wordcloud(build_cloud_text(negative), "Negative")
